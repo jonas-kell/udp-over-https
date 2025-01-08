@@ -41,21 +41,37 @@ async fn run_server() -> () {
     println!("Starting UDP listener at {}", listen_addr);
 
     // Start the HTTP server in a separate task
-    let http_server =
-        match HttpServer::new(|| App::new().route("/", web::get().to(hello_world))).bind(addr) {
+    let http_listener = spawn(async move {
+        let http_server = match HttpServer::new(|| {
+            App::new().route("/", web::get().to(hello_world))
+        })
+        .bind(addr)
+        {
             Ok(bound) => bound,
             Err(e) => {
-                eprintln!("Error starting server: {}", e);
+                eprintln!("Error binding server: {}", e);
                 return ();
             }
+        };
+
+        match http_server.run().await {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("Error running server: {}", e);
+                ()
+            }
         }
-        .run();
+    });
 
     // Start the UDP listener in a separate task
     let udp_listener = spawn(async move {
-        let socket = UdpSocket::bind(listen_addr)
-            .await
-            .expect("Failed to bind UDP socket");
+        let socket = match UdpSocket::bind(listen_addr).await {
+            Err(e) => {
+                eprintln!("Failed to bind UDP socket: {}", e);
+                return ();
+            }
+            Ok(s) => s,
+        };
         let mut buffer = vec![0u8; 1024];
 
         loop {
@@ -70,15 +86,15 @@ async fn run_server() -> () {
                     // Timeout expired, no data received
                     println!("No UDP packet received in the last 100ms. Continuing...");
                 }
-            }
+            };
         }
     });
 
-    // Wait for both tasks to complete
-    match tokio::try_join!(http_server, udp_listener) {
-        Err(_) => println!("Error joining listening tasks"),
-        Ok(_) => println!("All listeners closed"),
-    }
+    // Wait for all tasks to complete
+    match tokio::try_join!(http_listener, udp_listener) {
+        Err(_) => println!("Error in at least one listening task"),
+        Ok(_) => println!("All listeners closed successfully"),
+    };
 }
 
 /// Handler for the server's `/` endpoint
