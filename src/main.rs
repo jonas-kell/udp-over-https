@@ -9,13 +9,27 @@ use std::sync::{
 use std::time::Duration;
 use tokio::{net::UdpSocket, time};
 
-/// Simple program demonstrating HTTP server and client modes with Actix
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Mode of operation: 'server' or 'client'
     #[arg(value_enum)]
     mode: Mode,
+    /// Number of ms until at least once the client probes the server for new packets
+    #[arg(long, default_value_t = 1000)]
+    keep_alive_ms: u64,
+    /// The number of the port on that the program listens for udp packets
+    #[arg(long, default_value_t = 9898)]
+    udp_port: u32,
+    /// The number of the port on that the program listens for http traffic (only in server mode)
+    #[arg(long, default_value_t = 8888)]
+    http_port: u32,
+    /// Address of the udp relay target ("host:port", like "127.0.0.1:7777") (only in server mode)
+    #[arg(long, default_value_t = String::from("127.0.0.1:7777"))]
+    udp_port_relay_target: String,
+    /// Address of the server that accepts http(s) traffic (only in client mode)
+    #[arg(long, default_value_t = String::from("replace-with-proper-address"))]
+    http_server: String,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -29,20 +43,20 @@ async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     match args.mode {
-        Mode::Server => run_server().await,
-        Mode::Client => run_client().await,
+        Mode::Server => run_server(&args).await,
+        Mode::Client => run_client(&args).await,
     }
 
     Ok(())
 }
 
 /// Start the HTTP server and UDP listener for the server
-async fn run_server() -> () {
-    // ! TODO configure this from outside
-    let http_server_addr = "127.0.0.1:8080"; // TCP address for HTTP server
-    let udp_listener_addr: SocketAddr = "127.0.0.1:8081".parse().expect("Invalid listen address");
-    let tcp_keep_alive_ping_ms = 1000;
-    // ! TODO configure this from outside
+async fn run_server(args: &Args) -> () {
+    let http_server_addr = format!("0.0.0.0:{}", args.http_port); // TCP address for HTTP server, always on all interfaces
+    let udp_listener_addr: SocketAddr = format!("127.0.0.1:{}", args.udp_port)
+        .parse()
+        .expect("Invalid udp listen address");
+    let tcp_keep_alive_ping_ms = args.keep_alive_ms;
 
     println!("Starting HTTP server at http://{}", http_server_addr);
     println!("Starting UDP listener at {}", udp_listener_addr);
@@ -140,13 +154,14 @@ async fn udp_listener_server(
 }
 
 /// Listen on the UDP Port for the client and poll the server for packets to transfer
-async fn run_client() -> () {
-    // ! TODO configure this from outside
-    let udp_listener_addr: SocketAddr = "127.0.0.1:8082".parse().expect("Invalid listen address");
-    // let target_addr: SocketAddr = "127.0.0.1:9090".parse().expect("Invalid target address");
-    let server_url = "http://127.0.0.1:8080";
-    let tcp_keep_alive_ping_ms = 1000;
-    // ! TODO configure this from outside
+async fn run_client(args: &Args) -> () {
+    let udp_listener_addr: SocketAddr = format!("127.0.0.1:{}", args.udp_port)
+        .parse()
+        .expect("Invalid udp listen address");
+    let server_url = String::from(&args.http_server);
+    let tcp_keep_alive_ping_ms = args.keep_alive_ms;
+
+    println!("Starting UDP listener at {}", udp_listener_addr);
 
     // Bind a UDP socket to the listening address
     let socket = match UdpSocket::bind(udp_listener_addr).await {
@@ -170,7 +185,7 @@ async fn run_client() -> () {
         {
             Ok(Ok((len, src))) => {
                 println!("Received {} bytes from {}", len, src);
-                http_packet_exchange(&http_client, server_url, Some((len, &buffer))).await;
+                http_packet_exchange(&http_client, &server_url, Some((len, &buffer))).await;
             }
             Ok(Err(e)) => {
                 eprintln!("Error receiving UDP packet: {}", e);
@@ -180,7 +195,7 @@ async fn run_client() -> () {
                 println!(
                     "No UDP packet received in the last keep alive. Poll backend for new data..."
                 );
-                http_packet_exchange(&http_client, server_url, None).await;
+                http_packet_exchange(&http_client, &server_url, None).await;
             }
         }
     }
