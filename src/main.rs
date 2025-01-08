@@ -3,7 +3,7 @@ use clap::{Parser, ValueEnum};
 use reqwest::Client;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::{net::UdpSocket, time};
+use tokio::{net::UdpSocket, spawn, time};
 
 /// Simple program demonstrating HTTP server and client modes with Actix
 #[derive(Parser, Debug)]
@@ -28,19 +28,57 @@ async fn main() -> std::io::Result<()> {
         Mode::Server => run_server().await,
         Mode::Client => run_client().await,
     }
+
+    Ok(())
 }
 
-/// Start the HTTP server
-async fn run_server() -> std::io::Result<()> {
-    let addr = "127.0.0.1:8080";
+/// Start the HTTP server and UDP listener concurrently
+async fn run_server() -> () {
+    let addr = "127.0.0.1:8080"; // TCP address for HTTP server
     let listen_addr: SocketAddr = "127.0.0.1:8081".parse().expect("Invalid listen address");
 
-    println!("Starting server at http://{}", addr);
+    println!("Starting HTTP server at http://{}", addr);
+    println!("Starting UDP listener at {}", listen_addr);
 
-    HttpServer::new(|| App::new().route("/", web::get().to(hello_world)))
-        .bind(addr)?
-        .run()
-        .await
+    // Start the HTTP server in a separate task
+    let http_server =
+        match HttpServer::new(|| App::new().route("/", web::get().to(hello_world))).bind(addr) {
+            Ok(bound) => bound,
+            Err(e) => {
+                eprintln!("Error starting server: {}", e);
+                return ();
+            }
+        }
+        .run();
+
+    // Start the UDP listener in a separate task
+    let udp_listener = spawn(async move {
+        let socket = UdpSocket::bind(listen_addr)
+            .await
+            .expect("Failed to bind UDP socket");
+        let mut buffer = vec![0u8; 1024];
+
+        loop {
+            match time::timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await {
+                Ok(Ok((len, src))) => {
+                    println!("Received {} bytes from {}", len, src);
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Error receiving UDP packet: {}", e);
+                }
+                Err(_) => {
+                    // Timeout expired, no data received
+                    println!("No UDP packet received in the last 100ms. Continuing...");
+                }
+            }
+        }
+    });
+
+    // Wait for both tasks to complete
+    match tokio::try_join!(http_server, udp_listener) {
+        Err(_) => println!("Error joining listening tasks"),
+        Ok(_) => println!("All listeners closed"),
+    }
 }
 
 /// Handler for the server's `/` endpoint
@@ -49,14 +87,20 @@ async fn hello_world() -> impl Responder {
 }
 
 /// Run the client
-async fn run_client() -> std::io::Result<()> {
+async fn run_client() -> () {
     let listen_addr: SocketAddr = "127.0.0.1:8081".parse().expect("Invalid listen address");
     // let target_addr: SocketAddr = "127.0.0.1:9090".parse().expect("Invalid target address");
     let url = "http://127.0.0.1:8080";
     let tcp_keep_alive_ping_ms = 1000;
 
     // Bind a UDP socket to the listening address
-    let socket = UdpSocket::bind(listen_addr).await?;
+    let socket = match UdpSocket::bind(listen_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error receiving UDP packet: {}", e);
+            return ();
+        }
+    };
     println!("Listening on {}", listen_addr);
 
     let mut buffer = vec![0u8; 66000]; // Buffer to store incoming packets
