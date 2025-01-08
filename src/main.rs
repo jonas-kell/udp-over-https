@@ -36,11 +36,13 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Start the HTTP server and UDP listener concurrently
+/// Start the HTTP server and UDP listener for the server
 async fn run_server() -> () {
+    // ! TODO configure this from outside
     let http_server_addr = "127.0.0.1:8080"; // TCP address for HTTP server
     let udp_listener_addr: SocketAddr = "127.0.0.1:8081".parse().expect("Invalid listen address");
     let tcp_keep_alive_ping_ms = 1000;
+    // ! TODO configure this from outside
 
     println!("Starting HTTP server at http://{}", http_server_addr);
     println!("Starting UDP listener at {}", udp_listener_addr);
@@ -129,7 +131,7 @@ async fn udp_listener_server(
             }
             Err(_) => {
                 // Timeout expired, no data received -> this Err happens often and is expected, to assure the loop is cycled regularly
-                println!("No UDP packet received in the last 100ms. Continuing...");
+                println!("No UDP packet received in the last keep alive. Continuing...");
             }
         };
     }
@@ -137,15 +139,17 @@ async fn udp_listener_server(
     Ok(())
 }
 
-/// Run the client
+/// Listen on the UDP Port for the client and poll the server for packets to transfer
 async fn run_client() -> () {
-    let listen_addr: SocketAddr = "127.0.0.1:8081".parse().expect("Invalid listen address");
+    // ! TODO configure this from outside
+    let udp_listener_addr: SocketAddr = "127.0.0.1:8082".parse().expect("Invalid listen address");
     // let target_addr: SocketAddr = "127.0.0.1:9090".parse().expect("Invalid target address");
-    let url = "http://127.0.0.1:8080";
+    let server_url = "http://127.0.0.1:8080";
     let tcp_keep_alive_ping_ms = 1000;
+    // ! TODO configure this from outside
 
     // Bind a UDP socket to the listening address
-    let socket = match UdpSocket::bind(listen_addr).await {
+    let socket = match UdpSocket::bind(udp_listener_addr).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error binding UDP listener: {}", e);
@@ -153,10 +157,10 @@ async fn run_client() -> () {
         }
     };
 
-    let mut buffer = vec![0u8; 66000]; // Buffer to store incoming packets
+    // define a buffer that is larger than the max possible udp-packet-size
+    let mut buffer = vec![0u8; 66000];
 
-    let client = Client::new();
-
+    let http_client = Client::new();
     loop {
         match time::timeout(
             Duration::from_millis(tcp_keep_alive_ping_ms),
@@ -166,27 +170,41 @@ async fn run_client() -> () {
         {
             Ok(Ok((len, src))) => {
                 println!("Received {} bytes from {}", len, src);
-
-                // Perform HTTP request
-                let res = client
-                    .get(url)
-                    .send()
-                    .await
-                    .expect("Failed to send request");
-
-                let status = res.status();
-                let body = res.text().await.expect("Failed to read response body");
-
-                println!("Response Status: {}", status);
-                println!("Response Body: {}", body);
+                http_packet_exchange(&http_client, server_url, Some((len, &buffer))).await;
             }
             Ok(Err(e)) => {
                 eprintln!("Error receiving UDP packet: {}", e);
             }
             Err(_) => {
                 // Timeout expired, no data received -> this Err happens often and is expected, to assure the loop is cycled regularly
-                println!("Keep alive ping timing");
+                println!(
+                    "No UDP packet received in the last keep alive. Poll backend for new data..."
+                );
+                http_packet_exchange(&http_client, server_url, None).await;
             }
         }
     }
+}
+
+async fn http_packet_exchange(
+    http_client: &Client,
+    server_url: &str,
+    udp_packet_content: Option<(usize, &Vec<u8>)>,
+) {
+    let _ = udp_packet_content; // TODO
+
+    // Perform HTTP request
+    let res = match http_client.get(server_url).send().await {
+        Err(e) => {
+            eprintln!("Error when contacting server: {}", e);
+            return ();
+        }
+        Ok(res) => res,
+    };
+
+    let status = res.status();
+    if status.is_success() {
+        println!("Successful tunnel exchange")
+    }
+    // let body = res.text().await.expect("Failed to read response body");
 }
