@@ -1,10 +1,11 @@
 // #[macro_use]
 extern crate log;
 
+use crate::args::{Args, Mode};
 use crate::base64::{base_64_decode_string_to_bytes, base_64_encode_bytes_to_string};
 use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use async_channel;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -15,39 +16,8 @@ use std::sync::{
 use std::time::Duration;
 use tokio::{net::UdpSocket, time};
 
+mod args;
 mod base64;
-
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Mode of operation: 'server' or 'client'
-    #[arg(value_enum)]
-    mode: Mode,
-    /// Number of ms until at least once the client probes the server for new packets
-    #[arg(long, default_value_t = 1000)]
-    keep_alive_ms: u64,
-    /// The number of the port on that the program listens for udp packets
-    #[arg(long, default_value_t = 9898)]
-    udp_port: u32,
-    /// The number of the port on that the program listens for http traffic (only in server mode)
-    #[arg(long, default_value_t = 8888)]
-    http_port: u32,
-    /// Address of the udp relay target ("host:port", like "127.0.0.1:7777") (only in server mode)
-    #[arg(long, default_value_t = String::from("127.0.0.1:7777"))]
-    udp_port_relay_target: String,
-    /// Address of the server that accepts http(s) traffic (only in client mode)
-    #[arg(long, default_value_t = String::from("replace-with-proper-address"))]
-    http_server: String,
-    /// Pre-shared secret to improve security
-    #[arg(long, default_value_t = String::from("very-nice-pre-shared-secret-please-replace-with-proper-secret"))]
-    pre_shared_secret: String,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
-enum Mode {
-    Server,
-    Client,
-}
 
 #[derive(Serialize, Deserialize)]
 struct HttpData {
