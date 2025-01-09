@@ -185,15 +185,14 @@ async fn http_client_poller_handler(
         if let Some(packet_content) = udp_packet {
             // sending instantly with content
             last_sent_timestamp = time::SystemTime::now();
-            http_packet_exchange(
-                &http_client,
-                &server_url,
+            tokio::task::spawn(http_packet_exchange(
+                http_client.clone(),
+                server_url.clone(),
                 Some(packet_content),
                 sender_http_to_udp.clone(),
                 max_client_tunnel_ms,
                 pre_shared_secret.clone(),
-            )
-            .await // TODO just blast out to improve performance
+            ));
         }
         let too_long_since_last_ping = last_sent_timestamp
             .elapsed()
@@ -202,27 +201,31 @@ async fn http_client_poller_handler(
         if too_long_since_last_ping {
             trace!("Need to trigger ping because keep alive tcp limit reached");
             last_sent_timestamp = time::SystemTime::now();
-            http_packet_exchange(
-                &http_client,
-                &server_url,
+            tokio::task::spawn(http_packet_exchange(
+                http_client.clone(),
+                server_url.clone(),
                 None,
                 sender_http_to_udp.clone(),
                 max_client_tunnel_ms,
                 pre_shared_secret.clone(),
-            )
-            .await // TODO just blast out to improve performance
+            ));
         }
+
+        // yield to the tasks, they will give back the execution possibilities when reaching their server call
+        tokio::task::yield_now().await;
     }
 }
 
 async fn http_packet_exchange(
-    http_client: &Client,
-    server_url: &str,
+    http_client: Client,
+    server_url: String,
     udp_packet_content: Option<String>,
     sender_http_to_udp: async_channel::Sender<String>,
     max_client_tunnel_ms: u64,
     pre_shared_secret: String,
 ) {
+    trace!("Start tunnel exchange");
+
     // create payload
     let mut data = HttpData {
         secret: pre_shared_secret.clone(),
