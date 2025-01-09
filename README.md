@@ -1,4 +1,4 @@
-# udp-over-https
+# Tunnel: udp-over-http(s)
 
 A proxy that does something neither efficient nor clean: proxy udp packets over a https-connection. But could be useful in some cases
 
