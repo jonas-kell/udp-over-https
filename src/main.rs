@@ -1,8 +1,9 @@
-#[macro_use]
+// #[macro_use]
 extern crate log;
 
 use crate::base64::{base_64_decode_string_to_bytes, base_64_encode_bytes_to_string};
 use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
+use async_channel;
 use clap::{Parser, ValueEnum};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,8 @@ struct HttpData {
 #[derive(Debug)]
 struct AppState {
     args: Args,
+    receiver_udp_to_http: async_channel::Receiver<String>,
+    sender_http_to_udp: async_channel::Sender<String>,
 }
 
 #[actix_web::main]
@@ -81,10 +84,17 @@ async fn run_server(args: &Args) -> () {
     let udp_listener_addr: SocketAddr = format!("127.0.0.1:{}", args.udp_port)
         .parse()
         .expect("Invalid udp listen address");
+    let udp_relay_target_addr: SocketAddr = format!("{}", args.udp_port_relay_target)
+        .parse()
+        .expect("Invalid udp relay target address");
     let tcp_keep_alive_ping_ms = args.keep_alive_ms;
 
     println!("Starting HTTP server at http://{}", http_server_addr);
     println!("Starting UDP listener at {}", udp_listener_addr);
+
+    // define local communication channel for relaying udp packets to the http responder to relay them
+    let (sender_udp_to_http, receiver_udp_to_http) = async_channel::unbounded::<String>();
+    let (sender_http_to_udp, receiver_http_to_udp) = async_channel::unbounded::<String>();
 
     // Define http server
     let args_copy = Arc::new((*args).clone());
@@ -92,7 +102,11 @@ async fn run_server(args: &Args) -> () {
         let args_clone = (*Arc::clone(&args_copy)).clone();
         App::new()
             .route("/", web::post().to(server_main_http_request_handler))
-            .app_data(web::Data::new(AppState { args: args_clone }))
+            .app_data(web::Data::new(AppState {
+                args: args_clone,
+                receiver_udp_to_http: receiver_udp_to_http.clone(),
+                sender_http_to_udp: sender_http_to_udp.clone(),
+            }))
             .app_data(web::PayloadConfig::new(1000000)) // 1mb payload limit
             .app_data(web::JsonConfig::default().limit(1000000)) // 1mb json limit
             .wrap(middleware::Logger::default())
@@ -114,7 +128,10 @@ async fn run_server(args: &Args) -> () {
     let udp_listener = udp_listener_server(
         Arc::clone(&udp_listener_shutdown_marker),
         udp_listener_addr,
+        udp_relay_target_addr,
         tcp_keep_alive_ping_ms,
+        sender_udp_to_http,
+        receiver_http_to_udp,
     );
 
     let http_server_task = tokio::spawn(http_server);
@@ -152,14 +169,33 @@ async fn server_main_http_request_handler(
         HttpResponse::Unauthorized();
     }
 
+    // forward the packets that were sent in the post data
+    let sender_http_to_udp = app_state.sender_http_to_udp.clone();
+    for packet in &post_data.data {
+        if sender_http_to_udp.send(packet.clone()).await.is_err() {
+            eprintln!("Writing into the internal back-comm channel failed");
+        }
+    }
+
+    // read the packets to send back from the internal channel
     let mut data = HttpData {
         secret: String::from(&args.pre_shared_secret),
-        data: vec![base_64_encode_bytes_to_string(
-            String::from("test").as_bytes(),
-        )],
+        data: Vec::new(),
     };
-
-    // TODO mut data
+    let receiver_udp_to_http = app_state.receiver_udp_to_http.clone();
+    loop {
+        match receiver_udp_to_http.try_recv() {
+            Ok(mes) => {
+                data.data.push(mes);
+            }
+            Err(e) => {
+                if !e.is_empty() {
+                    eprintln!("Receiver error, but it is not empty: {}", e);
+                }
+                break;
+            }
+        }
+    }
 
     // return the data
     HttpResponse::Ok().json(data)
@@ -168,7 +204,10 @@ async fn server_main_http_request_handler(
 async fn udp_listener_server(
     shutdown_marker: Arc<AtomicBool>,
     listen_addr: SocketAddr,
+    target_addr: SocketAddr,
     tcp_keep_alive_ping_ms: u64,
+    sender_udp_to_http: async_channel::Sender<String>,
+    receiver_http_to_udp: async_channel::Receiver<String>,
 ) -> std::io::Result<()> {
     let socket = match UdpSocket::bind(listen_addr).await {
         Err(e) => {
@@ -186,6 +225,28 @@ async fn udp_listener_server(
             break;
         }
 
+        // send all packets in the channel onward
+        loop {
+            match receiver_http_to_udp.try_recv() {
+                Ok(packet) => {
+                    match socket
+                        .send_to(&base_64_decode_string_to_bytes(&packet), target_addr)
+                        .await
+                    {
+                        Ok(len) => println!("Forwarded {} bytes to {}", len, target_addr),
+                        Err(e) => eprintln!("Error when emitting udp packet: {}", e),
+                    };
+                }
+                Err(e) => {
+                    if !e.is_empty() {
+                        eprintln!("Back-receiver error, but it is not empty: {}", e);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // try to receive packets on the udp port
         match time::timeout(
             Duration::from_millis(tcp_keep_alive_ping_ms),
             socket.recv_from(&mut buffer),
@@ -194,6 +255,13 @@ async fn udp_listener_server(
         {
             Ok(Ok((len, src))) => {
                 println!("Received {} bytes from {}", len, src);
+                if sender_udp_to_http
+                    .send(base_64_encode_bytes_to_string(&buffer[..len]))
+                    .await
+                    .is_err()
+                {
+                    eprintln!("Writing into the internal comm channel failed");
+                }
             }
             Ok(Err(e)) => {
                 eprintln!("Error receiving UDP packet: {}", e);
