@@ -6,9 +6,15 @@ pub struct Args {
     /// Mode of operation: 'server' or 'client'
     #[arg(value_enum)]
     pub mode: Mode,
-    /// Number of ms until at least once the client probes the server for new packets
+    /// Number of ms until at least once the client probes the server for new packets (only in client mode)
     #[arg(long, default_value_t = 1000)]
     pub keep_alive_ms: u64,
+    /// Number of ms until interface listeners check for new tasks
+    #[arg(long, default_value_t = 300)]
+    pub listener_interrupt_ms: u64,
+    /// Number of ms a single client tunnel pass is waited for before aborted (only in client mode)
+    #[arg(long, default_value_t = 4000)]
+    pub max_tunnel_ms: u64,
     /// The number of the port on that the program listens for udp packets
     #[arg(long, default_value_t = 9898)]
     pub udp_port: u32,

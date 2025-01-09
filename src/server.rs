@@ -27,7 +27,7 @@ pub async fn run_server(args: &Args) -> () {
     let udp_relay_target_addr: SocketAddr = format!("{}", args.udp_port_relay_target)
         .parse()
         .expect("Invalid udp relay target address");
-    let tcp_keep_alive_ping_ms = args.keep_alive_ms;
+    let listener_interrupt_ms = args.listener_interrupt_ms;
 
     info!("Starting HTTP server at http://{}", http_server_addr);
     info!("Starting UDP listener at {}", udp_listener_addr);
@@ -69,11 +69,12 @@ pub async fn run_server(args: &Args) -> () {
         Arc::clone(&udp_listener_shutdown_marker),
         udp_listener_addr,
         udp_relay_target_addr,
-        tcp_keep_alive_ping_ms,
+        listener_interrupt_ms,
         sender_udp_to_http,
         receiver_http_to_udp,
     );
 
+    // spawn the async runtimes in parallel
     let http_server_task = tokio::spawn(http_server);
     let udp_listener_task = tokio::spawn(udp_listener);
     let shutdown_task = tokio::spawn(async move {
@@ -145,7 +146,7 @@ async fn udp_listener_server(
     shutdown_marker: Arc<AtomicBool>,
     listen_addr: SocketAddr,
     target_addr: SocketAddr,
-    tcp_keep_alive_ping_ms: u64,
+    listener_interrupt_ms: u64,
     sender_udp_to_http: async_channel::Sender<String>,
     receiver_http_to_udp: async_channel::Receiver<String>,
 ) -> std::io::Result<()> {
@@ -188,7 +189,7 @@ async fn udp_listener_server(
 
         // try to receive packets on the udp port
         match time::timeout(
-            Duration::from_millis(tcp_keep_alive_ping_ms),
+            Duration::from_millis(listener_interrupt_ms),
             socket.recv_from(&mut buffer),
         )
         .await
