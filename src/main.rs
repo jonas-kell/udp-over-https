@@ -1,5 +1,8 @@
+#[macro_use]
+extern crate log;
+
 use crate::base64::{base_64_decode_string_to_bytes, base_64_encode_bytes_to_string};
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use clap::{Parser, ValueEnum};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -58,6 +61,10 @@ struct AppState {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // std::env::set_var("RUST_LOG", "trace");
+    std::env::set_var("RUST_LOG", "off");
+    env_logger::init();
+
     let args = Args::parse();
 
     match args.mode {
@@ -86,6 +93,9 @@ async fn run_server(args: &Args) -> () {
         App::new()
             .route("/", web::post().to(server_main_http_request_handler))
             .app_data(web::Data::new(AppState { args: args_clone }))
+            .app_data(web::PayloadConfig::new(1000000)) // 1mb payload limit
+            .app_data(web::JsonConfig::default().limit(1000000)) // 1mb json limit
+            .wrap(middleware::Logger::default())
     })
     .bind(http_server_addr)
     {
@@ -131,7 +141,7 @@ async fn run_server(args: &Args) -> () {
 
 /// Handler for the http server endpoints
 async fn server_main_http_request_handler(
-    app_state: web::Data<Arc<AppState>>,
+    app_state: web::Data<AppState>,
     post_data: web::Json<HttpData>,
 ) -> impl Responder {
     let args: &Args = &app_state.args;
@@ -144,7 +154,9 @@ async fn server_main_http_request_handler(
 
     let mut data = HttpData {
         secret: String::from(&args.pre_shared_secret),
-        data: vec![String::from("test")],
+        data: vec![base_64_encode_bytes_to_string(
+            String::from("test").as_bytes(),
+        )],
     };
 
     // TODO mut data
