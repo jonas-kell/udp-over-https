@@ -24,6 +24,9 @@ pub struct Args {
     /// Pre-shared secret to improve security
     #[arg(long, default_value_t = String::from("very-nice-pre-shared-secret-please-replace-with-proper-secret"))]
     pub pre_shared_secret: String,
+    /// Verbosity (-v for verbose mode)
+    #[arg(short, long, action = clap::ArgAction::SetTrue)]
+    pub verbose: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]

@@ -1,4 +1,4 @@
-// #[macro_use]
+#[macro_use]
 extern crate log;
 
 use crate::args::{Args, Mode};
@@ -34,11 +34,14 @@ struct AppState {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // std::env::set_var("RUST_LOG", "trace");
-    std::env::set_var("RUST_LOG", "off");
-    env_logger::init();
+    std::env::set_var("RUST_LOG", "debug,actix=off,reqwest=off,hyper=off");
 
     let args = Args::parse();
+    if args.verbose {
+        std::env::set_var("RUST_LOG", "trace"); // more logs!!
+    }
+
+    env_logger::init();
 
     match args.mode {
         Mode::Server => run_server(&args).await,
@@ -59,8 +62,8 @@ async fn run_server(args: &Args) -> () {
         .expect("Invalid udp relay target address");
     let tcp_keep_alive_ping_ms = args.keep_alive_ms;
 
-    println!("Starting HTTP server at http://{}", http_server_addr);
-    println!("Starting UDP listener at {}", udp_listener_addr);
+    info!("Starting HTTP server at http://{}", http_server_addr);
+    info!("Starting UDP listener at {}", udp_listener_addr);
 
     // define local communication channel for relaying udp packets to the http responder to relay them
     let (sender_udp_to_http, receiver_udp_to_http) = async_channel::unbounded::<String>();
@@ -85,7 +88,7 @@ async fn run_server(args: &Args) -> () {
     {
         Ok(bound) => bound,
         Err(e) => {
-            eprintln!("Error binding http server: {}", e);
+            error!("Error binding http server: {}", e);
             return ();
         }
     }
@@ -121,8 +124,8 @@ async fn run_server(args: &Args) -> () {
     // Wait for all tasks to complete
     // https://github.com/actix/actix-web/issues/2739#issuecomment-1107638674
     match tokio::try_join!(http_server_task, udp_listener_task, shutdown_task) {
-        Err(_) => println!("Error in at least one listening task"),
-        Ok(_) => println!("All listeners closed successfully"),
+        Err(_) => error!("Error in at least one listening task"),
+        Ok(_) => info!("All listeners closed successfully"),
     };
 }
 
@@ -135,7 +138,7 @@ async fn server_main_http_request_handler(
 
     // TODO unsecure: this is not a constant-time-compare...
     if args.pre_shared_secret != post_data.secret {
-        eprintln!("Packet was sent to server with right format, but invalid pre-shared-secret");
+        error!("Packet was sent to server with right format, but invalid pre-shared-secret");
         HttpResponse::Unauthorized();
     }
 
@@ -143,7 +146,7 @@ async fn server_main_http_request_handler(
     let sender_http_to_udp = app_state.sender_http_to_udp.clone();
     for packet in &post_data.data {
         if sender_http_to_udp.send(packet.clone()).await.is_err() {
-            eprintln!("Writing into the internal back-comm channel failed");
+            error!("Writing into the internal back-comm channel failed");
         }
     }
 
@@ -160,7 +163,7 @@ async fn server_main_http_request_handler(
             }
             Err(e) => {
                 if !e.is_empty() {
-                    eprintln!("Receiver error, but it is not empty: {}", e);
+                    error!("Receiver error, but it is not empty: {}", e);
                 }
                 break;
             }
@@ -181,7 +184,7 @@ async fn udp_listener_server(
 ) -> std::io::Result<()> {
     let socket = match UdpSocket::bind(listen_addr).await {
         Err(e) => {
-            eprintln!("Error binding UDP listener: {}", e);
+            error!("Error binding UDP listener: {}", e);
             return Err(e);
         }
         Ok(s) => s,
@@ -203,13 +206,13 @@ async fn udp_listener_server(
                         .send_to(&base_64_decode_string_to_bytes(&packet), target_addr)
                         .await
                     {
-                        Ok(len) => println!("Forwarded {} bytes to {}", len, target_addr),
-                        Err(e) => eprintln!("Error when emitting udp packet: {}", e),
+                        Ok(len) => debug!("Forwarded {} bytes to {}", len, target_addr),
+                        Err(e) => error!("Error when emitting udp packet: {}", e),
                     };
                 }
                 Err(e) => {
                     if !e.is_empty() {
-                        eprintln!("Back-receiver error, but it is not empty: {}", e);
+                        error!("Back-receiver error, but it is not empty: {}", e);
                     }
                     break;
                 }
@@ -224,21 +227,21 @@ async fn udp_listener_server(
         .await
         {
             Ok(Ok((len, src))) => {
-                println!("Received {} bytes from {}", len, src);
+                debug!("Received {} bytes from {}", len, src);
                 if sender_udp_to_http
                     .send(base_64_encode_bytes_to_string(&buffer[..len]))
                     .await
                     .is_err()
                 {
-                    eprintln!("Writing into the internal comm channel failed");
+                    error!("Writing into the internal comm channel failed");
                 }
             }
             Ok(Err(e)) => {
-                eprintln!("Error receiving UDP packet: {}", e);
+                error!("Error receiving UDP packet: {}", e);
             }
             Err(_) => {
                 // Timeout expired, no data received -> this Err happens often and is expected, to assure the loop is cycled regularly
-                println!("No UDP packet received in the last keep alive. Continuing...");
+                trace!("No UDP packet received in the last keep alive. Continuing...");
             }
         };
     }
@@ -254,13 +257,13 @@ async fn run_client(args: &Args) -> () {
     let server_url = String::from(&args.http_server);
     let tcp_keep_alive_ping_ms = args.keep_alive_ms;
 
-    println!("Starting UDP listener at {}", udp_listener_addr);
+    info!("Starting UDP listener at {}", udp_listener_addr);
 
     // Bind a UDP socket to the listening address
     let socket = match UdpSocket::bind(udp_listener_addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error binding UDP listener: {}", e);
+            error!("Error binding UDP listener: {}", e);
             return ();
         }
     };
@@ -278,7 +281,7 @@ async fn run_client(args: &Args) -> () {
         .await
         {
             Ok(Ok((len, src))) => {
-                println!("Received {} bytes from {}", len, src);
+                debug!("Received {} bytes from {}", len, src);
 
                 // update the target_address
                 target_address = src.clone();
@@ -295,11 +298,11 @@ async fn run_client(args: &Args) -> () {
                 .await;
             }
             Ok(Err(e)) => {
-                eprintln!("Error receiving UDP packet: {}", e);
+                error!("Error receiving UDP packet: {}", e);
             }
             Err(_) => {
                 // Timeout expired, no data received -> this Err happens often and is expected, to assure the loop is cycled regularly
-                println!(
+                trace!(
                     "No UDP packet received in the last keep alive. Poll backend for new data..."
                 );
                 http_packet_exchange(
@@ -337,7 +340,7 @@ async fn http_packet_exchange(
     // Perform HTTP request
     let res = match http_client.post(server_url).json(&data).send().await {
         Err(e) => {
-            eprintln!("Error when contacting server: {}", e);
+            error!("Error when contacting server: {}", e);
             return ();
         }
         Ok(res) => res,
@@ -345,7 +348,7 @@ async fn http_packet_exchange(
 
     let status = res.status();
     if !status.is_success() {
-        eprintln!(
+        error!(
             "Got back faulty code from tunnel exchange: {}",
             status.as_u16()
         );
@@ -355,7 +358,7 @@ async fn http_packet_exchange(
     // attempt parse the received json response
     let body = match res.json::<HttpData>().await {
         Err(e) => {
-            eprintln!("Server answered, but json body could not be parsed: {}", e);
+            error!("Server answered, but json body could not be parsed: {}", e);
             return ();
         }
         Ok(b) => b,
@@ -363,9 +366,7 @@ async fn http_packet_exchange(
 
     // check returned pre-shared-secret
     if body.secret != args.pre_shared_secret {
-        eprintln!(
-            "Packet was received from server with right format, but invalid pre-shared-secret"
-        );
+        error!("Packet was received from server with right format, but invalid pre-shared-secret");
         return ();
     }
 
@@ -375,8 +376,8 @@ async fn http_packet_exchange(
             .send_to(&base_64_decode_string_to_bytes(&packet), target_addr)
             .await
         {
-            Ok(len) => println!("Forwarded {} bytes to {}", len, target_addr),
-            Err(e) => eprintln!("Error when emitting udp packet: {}", e),
+            Ok(len) => debug!("Forwarded {} bytes to {}", len, target_addr),
+            Err(e) => error!("Error when emitting udp packet: {}", e),
         };
     }
 }
