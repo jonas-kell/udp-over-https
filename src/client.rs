@@ -44,8 +44,8 @@ pub async fn run_client(args: &Args) -> () {
     let http_client_poller_shutdown_marker = Arc::new(AtomicBool::new(false));
     let http_client_poller = http_client_poller_handler(
         Arc::clone(&http_client_poller_shutdown_marker),
-        max_client_tunnel_ms,
         tcp_keep_alive_ping_ms,
+        max_client_tunnel_ms,
         server_url,
         sender_http_to_udp,
         receiver_udp_to_http,
