@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{self, Duration},
+    time::Duration,
 };
 use tokio::{self, net::UdpSocket};
 
@@ -165,54 +165,45 @@ async fn http_client_poller_handler(
 ) {
     let http_client = Client::new();
 
-    let mut last_sent_timestamp: time::SystemTime = time::SystemTime::UNIX_EPOCH;
     loop {
         if shutdown_marker.load(Ordering::SeqCst) {
             break;
         }
 
         // see if the buffer has something to send
-        let mut udp_packet: Option<String> = None;
-        match receiver_udp_to_http.try_recv() {
-            Ok(mes) => udp_packet = Some(mes),
-            Err(e) => {
-                if !e.is_empty() {
-                    error!("Receiver error, but it is not empty: {}", e);
-                }
+        match tokio::time::timeout(
+            Duration::from_millis(tcp_keep_alive_ping_ms),
+            receiver_udp_to_http.recv(),
+        )
+        .await
+        {
+            Ok(Ok(packet_content)) => {
+                trace!("Gotten packet from udp channel, sending immediately");
+                tokio::task::spawn(http_packet_exchange(
+                    http_client.clone(),
+                    server_url.clone(),
+                    Some(packet_content),
+                    sender_http_to_udp.clone(),
+                    max_client_tunnel_ms,
+                    pre_shared_secret.clone(),
+                ));
             }
-        }
-
-        if let Some(packet_content) = udp_packet {
-            // sending instantly with content
-            last_sent_timestamp = time::SystemTime::now();
-            tokio::task::spawn(http_packet_exchange(
-                http_client.clone(),
-                server_url.clone(),
-                Some(packet_content),
-                sender_http_to_udp.clone(),
-                max_client_tunnel_ms,
-                pre_shared_secret.clone(),
-            ));
-        }
-        let too_long_since_last_ping = last_sent_timestamp
-            .elapsed()
-            .unwrap_or_else(|_| time::Duration::from_micros(0))
-            > time::Duration::from_millis(tcp_keep_alive_ping_ms);
-        if too_long_since_last_ping {
-            trace!("Need to trigger ping because keep alive tcp limit reached");
-            last_sent_timestamp = time::SystemTime::now();
-            tokio::task::spawn(http_packet_exchange(
-                http_client.clone(),
-                server_url.clone(),
-                None,
-                sender_http_to_udp.clone(),
-                max_client_tunnel_ms,
-                pre_shared_secret.clone(),
-            ));
-        }
-
-        // yield to the tasks, they will give back the execution possibilities when reaching their server call
-        tokio::task::yield_now().await;
+            Ok(Err(e)) => {
+                error!("Receiver error: {}", e);
+            }
+            Err(_) => {
+                // Timeout expired, no data received -> this Err happens often and is expected, to assure the backend is pinged regularly
+                trace!("Need to trigger ping because keep alive tcp limit reached");
+                tokio::task::spawn(http_packet_exchange(
+                    http_client.clone(),
+                    server_url.clone(),
+                    None,
+                    sender_http_to_udp.clone(),
+                    max_client_tunnel_ms,
+                    pre_shared_secret.clone(),
+                ));
+            }
+        };
     }
 }
 
