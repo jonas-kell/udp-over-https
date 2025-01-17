@@ -241,6 +241,8 @@ async fn http_packet_exchange(
         Ok(res) => res,
     };
 
+    info!("HTTP-Communication over http-version: {:?}", res.version());
+
     let status = res.status();
     if !status.is_success() {
         error!(
