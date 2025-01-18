@@ -105,13 +105,19 @@ async fn udp_listener_client(
         loop {
             match receiver_http_to_udp.try_recv() {
                 Ok(packet) => {
-                    match socket
-                        .send_to(&base_64_decode_string_to_bytes(&packet), target_addr)
-                        .await
-                    {
-                        Ok(len) => debug!("Forwarded {} bytes to {}", len, target_addr),
-                        Err(e) => error!("Error when emitting udp packet: {}", e),
-                    };
+                    if target_addr.port() != 0 {
+                        match socket
+                            .send_to(&base_64_decode_string_to_bytes(&packet), target_addr)
+                            .await
+                        {
+                            Ok(len) => debug!("Forwarded {} bytes to {}", len, target_addr),
+                            Err(e) => error!("Error when emitting udp packet: {}", e),
+                        };
+                    } else {
+                        trace!(
+                            "Got packet, but no inbound packet yet, so no port to emit it back to"
+                        );
+                    }
                 }
                 Err(e) => {
                     if !e.is_empty() {
