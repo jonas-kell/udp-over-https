@@ -3,6 +3,7 @@ use crate::{
     base64::{base_64_decode_string_to_bytes, base_64_encode_bytes_to_string},
     interfaces::HttpData,
 };
+use log_once::debug_once;
 use reqwest::Client;
 use std::{
     net::SocketAddr,
@@ -50,6 +51,7 @@ pub async fn run_client(args: &Args) -> () {
         sender_http_to_udp,
         receiver_udp_to_http,
         args.pre_shared_secret.clone(),
+        args.force_http2,
     );
 
     // spawn the async runtimes in parallel
@@ -162,8 +164,19 @@ async fn http_client_poller_handler(
     sender_http_to_udp: async_channel::Sender<String>,
     receiver_udp_to_http: async_channel::Receiver<String>,
     pre_shared_secret: String,
+    force_http2: bool,
 ) {
-    let http_client = Client::new();
+    let mut builder = Client::builder();
+    if force_http2 {
+        builder = builder.http2_prior_knowledge();
+    }
+    let http_client = match builder.build() {
+        Err(e) => {
+            error!("Error while building the polling client: {}", e);
+            return ();
+        }
+        Ok(c) => c,
+    };
 
     loop {
         if shutdown_marker.load(Ordering::SeqCst) {
@@ -241,7 +254,10 @@ async fn http_packet_exchange(
         Ok(res) => res,
     };
 
-    info!("HTTP-Communication over http-version: {:?}", res.version());
+    trace!("HTTP-Communication over http-version: {:?}", res.version());
+    if res.version() == reqwest::Version::HTTP_2 {
+        debug_once!("HTTP-Version 2 communication enabled and working");
+    }
 
     let status = res.status();
     if !status.is_success() {

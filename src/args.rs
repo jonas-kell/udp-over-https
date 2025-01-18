@@ -33,6 +33,9 @@ pub struct Args {
     /// Verbosity (-v for verbose mode)
     #[arg(short, long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
+    /// Force the usage of Http protocol version 2
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub force_http2: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
