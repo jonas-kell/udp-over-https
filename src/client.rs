@@ -13,6 +13,7 @@ use std::{
         Arc,
     },
     time::Duration,
+    time::SystemTime,
 };
 use tokio::{self, net::UdpSocket};
 
@@ -262,6 +263,8 @@ async fn http_packet_exchange(
     let num_packets_sent = data.data.len();
     let num_packets_in_client_queue = data.add_messages;
 
+    let start_exchange = SystemTime::now();
+
     // Perform HTTP request
     let res = match http_client
         .post(server_url)
@@ -301,6 +304,11 @@ async fn http_packet_exchange(
         Ok(b) => b,
     };
 
+    let exchange_duration_ms = match SystemTime::now().duration_since(start_exchange) {
+        Err(_) => 0,
+        Ok(d) => d.as_millis(),
+    };
+
     // check returned pre-shared-secret (must also evidently be the same as the one send upstream)
     if body.secret != data.secret {
         error!("Packet was received from server with right format, but invalid pre-shared-secret");
@@ -318,5 +326,5 @@ async fn http_packet_exchange(
     }
 
     // give a resume of what just happened // TODO downgrade to debug
-    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue);
+    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue, exchange_duration_ms);
 }
