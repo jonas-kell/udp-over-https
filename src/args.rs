@@ -9,6 +9,9 @@ pub struct Args {
     /// Number of ms until at least once the client probes the server for new packets (only in client mode)
     #[arg(long, default_value_t = 1000)]
     pub keep_alive_ms: u64,
+    /// Maximum number of messages that can be carried over one http exchange to/from the server (only in client mode)
+    #[arg(long, default_value_t = 1)]
+    pub max_number_of_aggregate_messages: usize,
     /// Number of ms until interface listeners check for new tasks
     #[arg(long, default_value_t = 300)]
     pub listener_interrupt_ms: u64,
@@ -33,6 +36,9 @@ pub struct Args {
     /// Verbosity (-v for verbose mode)
     #[arg(short, long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
+    /// EXTRA Verbosity (--verbose_all for verbose mode)
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub verbose_all: bool,
     /// Force the usage of Http protocol version 2
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub force_http2: bool,

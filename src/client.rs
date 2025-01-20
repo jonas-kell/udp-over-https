@@ -2,6 +2,7 @@ use crate::{
     args::Args,
     base64::{base_64_decode_string_to_bytes, base_64_encode_bytes_to_string},
     interfaces::HttpData,
+    CURRENT_PROTOCOL_VERSION,
 };
 use log_once::debug_once;
 use reqwest::Client;
@@ -24,6 +25,7 @@ pub async fn run_client(args: &Args) -> () {
     let tcp_keep_alive_ping_ms = args.keep_alive_ms;
     let max_client_tunnel_ms = args.max_tunnel_ms;
     let listener_interrupt_ms = args.listener_interrupt_ms;
+    let max_number_of_aggregate_messages = args.max_number_of_aggregate_messages;
 
     info!("Starting UDP listener at {}", udp_listener_addr);
 
@@ -47,6 +49,7 @@ pub async fn run_client(args: &Args) -> () {
         Arc::clone(&http_client_poller_shutdown_marker),
         tcp_keep_alive_ping_ms,
         max_client_tunnel_ms,
+        max_number_of_aggregate_messages,
         server_url,
         sender_http_to_udp,
         receiver_udp_to_http,
@@ -166,6 +169,7 @@ async fn http_client_poller_handler(
     shutdown_marker: Arc<AtomicBool>,
     tcp_keep_alive_ping_ms: u64,
     max_client_tunnel_ms: u64,
+    max_number_of_aggregate_messages: usize,
     server_url: String,
     sender_http_to_udp: async_channel::Sender<String>,
     receiver_udp_to_http: async_channel::Receiver<String>,
@@ -184,66 +188,79 @@ async fn http_client_poller_handler(
         Ok(c) => c,
     };
 
+    // main loop that reads from the buffer and correctly dispatches http-transit handlers
     loop {
         if shutdown_marker.load(Ordering::SeqCst) {
             break;
         }
 
         // see if the buffer has something to send
-        match tokio::time::timeout(
-            Duration::from_millis(tcp_keep_alive_ping_ms),
-            receiver_udp_to_http.recv(),
-        )
-        .await
-        {
-            Ok(Ok(packet_content)) => {
-                trace!("Gotten packet from udp channel, sending immediately");
-                tokio::task::spawn(http_packet_exchange(
-                    http_client.clone(),
-                    server_url.clone(),
-                    Some(packet_content),
-                    sender_http_to_udp.clone(),
-                    max_client_tunnel_ms,
-                    pre_shared_secret.clone(),
-                ));
-            }
-            Ok(Err(e)) => {
-                error!("Receiver error: {}", e);
-            }
-            Err(_) => {
-                // Timeout expired, no data received -> this Err happens often and is expected, to assure the backend is pinged regularly
-                trace!("Need to trigger ping because keep alive tcp limit reached");
-                tokio::task::spawn(http_packet_exchange(
-                    http_client.clone(),
-                    server_url.clone(),
-                    None,
-                    sender_http_to_udp.clone(),
-                    max_client_tunnel_ms,
-                    pre_shared_secret.clone(),
-                ));
-            }
+        let mut sending_data = HttpData {
+            version: CURRENT_PROTOCOL_VERSION,
+            add_messages: 0,      // needs to be filled
+            send_back_mess: None, // TODO -> flow control
+            secret: pre_shared_secret.clone(),
+            data: Vec::new(),
         };
+
+        while sending_data.data.len() < max_number_of_aggregate_messages {
+            if shutdown_marker.load(Ordering::SeqCst) {
+                break;
+            }
+
+            match tokio::time::timeout(
+                Duration::from_millis(tcp_keep_alive_ping_ms),
+                receiver_udp_to_http.recv(),
+            )
+            .await
+            {
+                Ok(Ok(packet_content)) => {
+                    trace!("Gotten packet from udp channel, adding to queue to send");
+                    sending_data.data.push(packet_content);
+                }
+                Ok(Err(e)) => {
+                    error!("Receiver error: {}", e);
+                }
+                Err(_) => {
+                    // Timeout expired, no data received -> this Err happens often and is expected, to assure the backend is pinged regularly
+                    trace!("Waiting for message: timeout reached");
+                    break; // break out of the aggregate-messages-loop
+                }
+            };
+        }
+
+        // to know in the task later how many messages are pending for logging info about the channel aggregated
+        let num_extra_mess = receiver_udp_to_http.len();
+        sending_data.add_messages = match u16::try_from(num_extra_mess) {
+            Err(_) => u16::MAX,
+            Ok(v) => v,
+        };
+        if num_extra_mess > 0 {
+            warn!("Sending queue still holds {} messages", num_extra_mess);
+        }
+
+        // the result of this does not influence the next step of the program, so this will be executed in the background
+        tokio::task::spawn(http_packet_exchange(
+            http_client.clone(),
+            server_url.clone(),
+            sending_data,
+            sender_http_to_udp.clone(),
+            max_client_tunnel_ms,
+        ));
     }
 }
 
 async fn http_packet_exchange(
     http_client: Client,
     server_url: String,
-    udp_packet_content: Option<String>,
+    data: HttpData,
     sender_http_to_udp: async_channel::Sender<String>,
     max_client_tunnel_ms: u64,
-    pre_shared_secret: String,
 ) {
     trace!("Start tunnel exchange");
 
-    // create payload
-    let mut data = HttpData {
-        secret: pre_shared_secret.clone(),
-        data: Vec::new(),
-    };
-    if let Some(packet) = udp_packet_content {
-        data.data.push(packet);
-    }
+    let num_packets_sent = data.data.len();
+    let num_packets_in_client_queue = data.add_messages;
 
     // Perform HTTP request
     let res = match http_client
@@ -265,6 +282,7 @@ async fn http_packet_exchange(
         debug_once!("HTTP-Version 2 communication enabled and working");
     }
 
+    // check that the exchange succeeded in terms of code
     let status = res.status();
     if !status.is_success() {
         error!(
@@ -283,11 +301,14 @@ async fn http_packet_exchange(
         Ok(b) => b,
     };
 
-    // check returned pre-shared-secret
-    if body.secret != pre_shared_secret {
+    // check returned pre-shared-secret (must also evidently be the same as the one send upstream)
+    if body.secret != data.secret {
         error!("Packet was received from server with right format, but invalid pre-shared-secret");
         return ();
     }
+
+    let num_packets_returned = body.data.len();
+    let num_packets_in_server_queue = body.add_messages;
 
     // forward the packets that were sent in the post data
     for packet in body.data {
@@ -295,4 +316,7 @@ async fn http_packet_exchange(
             error!("Writing into the internal back-comm channel failed");
         }
     }
+
+    // give a resume of what just happened // TODO downgrade to debug
+    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue);
 }

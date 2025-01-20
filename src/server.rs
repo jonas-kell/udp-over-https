@@ -1,6 +1,7 @@
 use crate::args::Args;
 use crate::base64::{base_64_decode_string_to_bytes, base_64_encode_bytes_to_string};
 use crate::interfaces::HttpData;
+use crate::CURRENT_PROTOCOL_VERSION;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use async_channel;
 use std::net::SocketAddr;
@@ -102,41 +103,70 @@ async fn server_main_http_request_handler(
     app_state: web::Data<AppState>,
     post_data: web::Json<HttpData>,
 ) -> impl Responder {
+    if post_data.version != CURRENT_PROTOCOL_VERSION {
+        error!(
+            "Client supplied protocol with version {}, but we wanted {}",
+            post_data.version, CURRENT_PROTOCOL_VERSION
+        );
+        return HttpResponse::BadRequest().body("Wrong Protocol Version");
+    }
+
     let args: &Args = &app_state.args;
 
     // TODO unsecure: this is not a constant-time-compare...
     if args.pre_shared_secret != post_data.secret {
         error!("Packet was sent to server with right format, but invalid pre-shared-secret");
-        HttpResponse::Unauthorized();
+        return HttpResponse::Unauthorized().body("No valid authorization");
     }
 
+    let mut max_number_of_packets_to_send_back: u16 = match post_data.send_back_mess {
+        None => u16::MAX,
+        Some(v) => v,
+    };
+
     // forward the packets that were sent in the post data
-    let sender_http_to_udp = app_state.sender_http_to_udp.clone();
     for packet in &post_data.data {
-        if sender_http_to_udp.send(packet.clone()).await.is_err() {
+        if app_state
+            .sender_http_to_udp
+            .send(packet.clone())
+            .await
+            .is_err()
+        {
             error!("Writing into the internal back-comm channel failed");
+            // This is no problem, as the channel must not be lossless. The TCP Protocol of the levels above will take care of this
         }
     }
 
     // read the packets to send back from the internal channel
     let mut data = HttpData {
+        version: CURRENT_PROTOCOL_VERSION,
+        add_messages: 0,
+        send_back_mess: None,
         secret: String::from(&args.pre_shared_secret),
         data: Vec::new(),
     };
-    let receiver_udp_to_http = app_state.receiver_udp_to_http.clone();
-    loop {
-        match receiver_udp_to_http.try_recv() {
+
+    while max_number_of_packets_to_send_back > 0 {
+        match app_state.receiver_udp_to_http.try_recv() {
             Ok(mes) => {
                 data.data.push(mes);
+                max_number_of_packets_to_send_back -= 1;
             }
             Err(e) => {
                 if !e.is_empty() {
                     error!("Receiver error, but it is not empty: {}", e);
                 }
+                // if the channel is empty, no use holding the connection open
+                // TODO ACTUALLY maybe it would come in helpful and more efficient to have a little server-control here, but we'll keep it at client control at the moment
                 break;
             }
         }
     }
+    // write back how many messages congest the cannel upstream
+    data.add_messages = match u16::try_from(app_state.receiver_udp_to_http.len()) {
+        Err(_) => u16::MAX,
+        Ok(v) => v,
+    };
 
     // return the data
     HttpResponse::Ok().json(data)

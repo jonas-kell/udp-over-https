@@ -13,6 +13,8 @@ mod client;
 mod interfaces;
 mod server;
 
+const CURRENT_PROTOCOL_VERSION: u8 = 1;
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::env::set_var(
@@ -22,7 +24,10 @@ async fn main() -> std::io::Result<()> {
 
     let args = Args::parse();
     if args.verbose {
-        std::env::set_var("RUST_LOG", "trace,h2=debug,tracing=off"); // more logs!!
+        std::env::set_var("RUST_LOG", "trace,hyper=off,h2=off,tracing=off"); // more logs (but not the ones that spam everything)!!
+    }
+    if args.verbose_all {
+        std::env::set_var("RUST_LOG", "trace"); // ALL the logs logs!!
     }
 
     env_logger::init();
