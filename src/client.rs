@@ -26,6 +26,7 @@ pub async fn run_client(args: &Args) -> () {
     let max_client_tunnel_ms = args.max_tunnel_ms;
     let listener_interrupt_ms = args.listener_interrupt_ms;
     let max_number_of_aggregate_messages = args.max_number_of_aggregate_messages;
+    let max_server_delay_ms = args.max_server_delay_ms;
 
     info!("Starting UDP listener at {}", udp_listener_addr);
 
@@ -48,6 +49,7 @@ pub async fn run_client(args: &Args) -> () {
     let http_client_poller = http_client_poller_handler(
         Arc::clone(&http_client_poller_shutdown_marker),
         tcp_keep_alive_ping_ms,
+        max_server_delay_ms,
         max_client_tunnel_ms,
         max_number_of_aggregate_messages,
         server_url,
@@ -168,6 +170,7 @@ async fn udp_listener_client(
 async fn http_client_poller_handler(
     shutdown_marker: Arc<AtomicBool>,
     tcp_keep_alive_ping_ms: u64,
+    max_server_delay_ms: u16,
     max_client_tunnel_ms: u64,
     max_number_of_aggregate_messages: usize,
     server_url: String,
@@ -199,50 +202,51 @@ async fn http_client_poller_handler(
         // see if the buffer has something to send
         let mut sending_data = HttpData {
             version: CURRENT_PROTOCOL_VERSION,
-            queue_messages: 0,    // needs to be filled
-            send_back_mess: None, // TODO -> flow control
-            wait_ms: Some(0),     // TODO -> flow control
+            queue_messages: 0, // will be filled later in the function
+            send_back_mess: Some(match u16::try_from(max_number_of_aggregate_messages) {
+                Ok(v) => v,
+                Err(_) => 1,
+            }), // TODO -> flow control
+            wait_ms: Some(max_server_delay_ms), // TODO -> flow control
             secret: pre_shared_secret.clone(),
             data: Vec::new(),
         };
 
-        let keep_alive_timeout_start = SystemTime::now();
-
-        while sending_data.data.len() < max_number_of_aggregate_messages {
-            if shutdown_marker.load(Ordering::SeqCst) {
-                break;
+        match tokio::time::timeout(
+            Duration::from_millis(tcp_keep_alive_ping_ms),
+            receiver_udp_to_http.recv(),
+        )
+        .await
+        {
+            Ok(Ok(packet_content)) => {
+                trace!("Gotten packet from udp channel, adding to queue to send");
+                sending_data.data.push(packet_content);
             }
+            Ok(Err(e)) => {
+                error!("Receiver error: {}", e);
+            }
+            Err(_) => {
+                // Timeout expired, no data received -> this Err happens often and is expected, to assure the backend is pinged regularly
+                trace!("Waiting for message: timeout reached");
+            }
+        };
 
-            let ms_since_last_keep_alive =
-                match SystemTime::now().duration_since(keep_alive_timeout_start) {
-                    Err(_) => 0,
-                    Ok(v) => v.as_millis(),
-                };
-
-            match tokio::time::timeout(
-                Duration::from_millis(
-                    u128::from(tcp_keep_alive_ping_ms)
-                        .checked_sub(ms_since_last_keep_alive)
-                        .map(|diff| diff as u64)
-                        .unwrap_or(0),
-                ),
-                receiver_udp_to_http.recv(),
-            )
-            .await
-            {
-                Ok(Ok(packet_content)) => {
-                    trace!("Gotten packet from udp channel, adding to queue to send");
-                    sending_data.data.push(packet_content);
+        // connection is being sent in any case, try to load it with as many additional packets as are instantly available and allowed
+        let mut num_add_packets_remaining =
+            std::cmp::max(1, max_number_of_aggregate_messages) - sending_data.data.len(); // data.len() is at most 1, at least 0
+        while num_add_packets_remaining > 0 {
+            match receiver_udp_to_http.try_recv() {
+                Err(e) => {
+                    if e.is_empty() {
+                        break;
+                    }
+                    error!("Reading from channel error: {}", e);
                 }
-                Ok(Err(e)) => {
-                    error!("Receiver error: {}", e);
+                Ok(mes) => {
+                    sending_data.data.push(mes); // additional packet on successful direct read
+                    num_add_packets_remaining -= 1;
                 }
-                Err(_) => {
-                    // Timeout expired, no data received -> this Err happens often and is expected, to assure the backend is pinged regularly
-                    trace!("Waiting for message: timeout reached");
-                    break; // break out of the aggregate-messages-loop
-                }
-            };
+            }
         }
 
         // to know in the task later how many messages are pending for logging info about the channel aggregated
@@ -279,6 +283,10 @@ async fn http_packet_exchange(
 
     let num_packets_sent = data.data.len();
     let num_packets_in_client_queue = data.queue_messages;
+    let server_should_wait_ms = match data.wait_ms {
+        Some(v) => v,
+        None => 0,
+    };
 
     let start_exchange = SystemTime::now();
 
@@ -353,5 +361,5 @@ async fn http_packet_exchange(
     let nr_running_requests = active_server_calls_nr.load(Ordering::SeqCst);
 
     // give a resume of what just happened // TODO downgrade to debug
-    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire. {} running requests", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue, exchange_duration_ms,nr_running_requests);
+    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire of which possibly waited {}ms. {} running requests", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue, exchange_duration_ms,server_should_wait_ms, nr_running_requests);
 }

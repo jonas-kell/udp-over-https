@@ -9,6 +9,9 @@ pub struct Args {
     /// Number of ms until at least once the client probes the server for new packets (only in client mode)
     #[arg(long, default_value_t = 100)]
     pub keep_alive_ms: u64,
+    /// Number of ms the server is waiting max before sending back an empty packet-aggregation (only in client mode)
+    #[arg(long, default_value_t = 1)]
+    pub max_server_delay_ms: u16,
     /// Maximum number of messages that can be carried over one http exchange to/from the server (only in client mode)
     #[arg(long, default_value_t = 1)]
     pub max_number_of_aggregate_messages: usize,

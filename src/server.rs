@@ -120,8 +120,8 @@ async fn server_main_http_request_handler(
     }
 
     let mut max_number_of_packets_to_send_back: u16 = match post_data.send_back_mess {
-        None => u16::MAX,
-        Some(v) => v,
+        None => 1,
+        Some(v) => std::cmp::max(v, 1),
     };
 
     // forward the packets that were sent in the post data
@@ -147,32 +147,45 @@ async fn server_main_http_request_handler(
         data: Vec::new(),
     };
 
-    while max_number_of_packets_to_send_back > 0 {
-        match tokio::time::timeout(
-            Duration::from_millis(
-                match post_data.wait_ms {
-                    Some(v) => v.into(),
-                    None => 0,
-                }, // if un-authenticated commands can be sent to the server, this makes it INSTANTLY possible to keep endless connections open maliciously
-            ),
-            app_state.receiver_udp_to_http.recv(),
-        )
-        .await
-        {
-            Ok(Ok(mes)) => {
-                data.data.push(mes);
-                max_number_of_packets_to_send_back -= 1;
+    match tokio::time::timeout(
+        Duration::from_millis(
+            match post_data.wait_ms {
+                Some(v) => v.into(),
+                None => 0,
+            }, // if un-authenticated commands can be sent to the server, this makes it INSTANTLY possible to keep endless connections open maliciously
+        ),
+        app_state.receiver_udp_to_http.recv(),
+    )
+    .await
+    {
+        Ok(Ok(mes)) => {
+            data.data.push(mes); // store one from the channel that has been (possibly) awaited
+            max_number_of_packets_to_send_back -= 1;
+
+            // piggy-back as many messages as allowed instantly onto the connection with no-delay read
+            while max_number_of_packets_to_send_back > 0 {
+                match app_state.receiver_udp_to_http.try_recv() {
+                    Ok(mes) => {
+                        data.data.push(mes); // additional packet on successful direct read
+                        max_number_of_packets_to_send_back -= 1;
+                    }
+                    Err(e) => {
+                        if e.is_empty() {
+                            break;
+                        }
+                        error!("Reading from channel error: {}", e);
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                error!("Unexpected receiver error: {}", e);
-                break;
-            }
-            Err(_) => {
-                // waiting timeout elapsed
-                break;
-            }
-        };
-    }
+        }
+        Ok(Err(e)) => {
+            error!("Unexpected receiver error: {}", e);
+        }
+        Err(_) => {
+            // waiting timeout elapsed
+        }
+    };
+
     // write back how many messages congest the cannel upstream
     data.queue_messages = match u16::try_from(app_state.receiver_udp_to_http.len()) {
         Err(_) => u16::MAX,
