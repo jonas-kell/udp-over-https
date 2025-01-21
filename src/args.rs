@@ -7,7 +7,7 @@ pub struct Args {
     #[arg(value_enum)]
     pub mode: Mode,
     /// Number of ms until at least once the client probes the server for new packets (only in client mode)
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 100)]
     pub keep_alive_ms: u64,
     /// Maximum number of messages that can be carried over one http exchange to/from the server (only in client mode)
     #[arg(long, default_value_t = 1)]

@@ -12,8 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use tokio::{self, net::UdpSocket};
 
@@ -204,13 +203,26 @@ async fn http_client_poller_handler(
             data: Vec::new(),
         };
 
+        let keep_alive_timeout_start = SystemTime::now();
+
         while sending_data.data.len() < max_number_of_aggregate_messages {
             if shutdown_marker.load(Ordering::SeqCst) {
                 break;
             }
 
+            let ms_since_last_keep_alive =
+                match SystemTime::now().duration_since(keep_alive_timeout_start) {
+                    Err(_) => 0,
+                    Ok(v) => v.as_millis(),
+                };
+
             match tokio::time::timeout(
-                Duration::from_millis(tcp_keep_alive_ping_ms),
+                Duration::from_millis(
+                    u128::from(tcp_keep_alive_ping_ms)
+                        .checked_sub(ms_since_last_keep_alive)
+                        .map(|diff| diff as u64)
+                        .unwrap_or(0),
+                ),
                 receiver_udp_to_http.recv(),
             )
             .await
