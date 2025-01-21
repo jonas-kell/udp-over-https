@@ -13,7 +13,7 @@ mod client;
 mod interfaces;
 mod server;
 
-const CURRENT_PROTOCOL_VERSION: u8 = 1;
+const CURRENT_PROTOCOL_VERSION: u8 = 2;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {

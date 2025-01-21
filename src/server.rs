@@ -140,30 +140,41 @@ async fn server_main_http_request_handler(
     // read the packets to send back from the internal channel
     let mut data = HttpData {
         version: CURRENT_PROTOCOL_VERSION,
-        add_messages: 0,
+        queue_messages: 0,
         send_back_mess: None,
+        wait_ms: None,
         secret: String::from(&args.pre_shared_secret),
         data: Vec::new(),
     };
 
     while max_number_of_packets_to_send_back > 0 {
-        match app_state.receiver_udp_to_http.try_recv() {
-            Ok(mes) => {
+        match tokio::time::timeout(
+            Duration::from_millis(
+                match post_data.wait_ms {
+                    Some(v) => v.into(),
+                    None => 0,
+                }, // if un-authenticated commands can be sent to the server, this makes it INSTANTLY possible to keep endless connections open maliciously
+            ),
+            app_state.receiver_udp_to_http.recv(),
+        )
+        .await
+        {
+            Ok(Ok(mes)) => {
                 data.data.push(mes);
                 max_number_of_packets_to_send_back -= 1;
             }
-            Err(e) => {
-                if !e.is_empty() {
-                    error!("Receiver error, but it is not empty: {}", e);
-                }
-                // if the channel is empty, no use holding the connection open
-                // TODO ACTUALLY maybe it would come in helpful and more efficient to have a little server-control here, but we'll keep it at client control at the moment
+            Ok(Err(e)) => {
+                error!("Unexpected receiver error: {}", e);
                 break;
             }
-        }
+            Err(_) => {
+                // waiting timeout elapsed
+                break;
+            }
+        };
     }
     // write back how many messages congest the cannel upstream
-    data.add_messages = match u16::try_from(app_state.receiver_udp_to_http.len()) {
+    data.queue_messages = match u16::try_from(app_state.receiver_udp_to_http.len()) {
         Err(_) => u16::MAX,
         Ok(v) => v,
     };

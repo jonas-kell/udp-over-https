@@ -9,7 +9,7 @@ use reqwest::Client;
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime},
@@ -176,6 +176,8 @@ async fn http_client_poller_handler(
     pre_shared_secret: String,
     force_http2: bool,
 ) {
+    let active_server_calls_nr: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
     let mut builder = Client::builder();
     if force_http2 {
         builder = builder.http2_prior_knowledge();
@@ -197,8 +199,9 @@ async fn http_client_poller_handler(
         // see if the buffer has something to send
         let mut sending_data = HttpData {
             version: CURRENT_PROTOCOL_VERSION,
-            add_messages: 0,      // needs to be filled
+            queue_messages: 0,    // needs to be filled
             send_back_mess: None, // TODO -> flow control
+            wait_ms: Some(0),     // TODO -> flow control
             secret: pre_shared_secret.clone(),
             data: Vec::new(),
         };
@@ -244,7 +247,7 @@ async fn http_client_poller_handler(
 
         // to know in the task later how many messages are pending for logging info about the channel aggregated
         let num_extra_mess = receiver_udp_to_http.len();
-        sending_data.add_messages = match u16::try_from(num_extra_mess) {
+        sending_data.queue_messages = match u16::try_from(num_extra_mess) {
             Err(_) => u16::MAX,
             Ok(v) => v,
         };
@@ -254,6 +257,7 @@ async fn http_client_poller_handler(
 
         // the result of this does not influence the next step of the program, so this will be executed in the background
         tokio::task::spawn(http_packet_exchange(
+            Arc::clone(&active_server_calls_nr),
             http_client.clone(),
             server_url.clone(),
             sending_data,
@@ -264,6 +268,7 @@ async fn http_client_poller_handler(
 }
 
 async fn http_packet_exchange(
+    active_server_calls_nr: Arc<AtomicUsize>,
     http_client: Client,
     server_url: String,
     data: HttpData,
@@ -273,9 +278,11 @@ async fn http_packet_exchange(
     trace!("Start tunnel exchange");
 
     let num_packets_sent = data.data.len();
-    let num_packets_in_client_queue = data.add_messages;
+    let num_packets_in_client_queue = data.queue_messages;
 
     let start_exchange = SystemTime::now();
+
+    active_server_calls_nr.fetch_add(1, Ordering::SeqCst);
 
     // Perform HTTP request
     let res = match http_client
@@ -287,7 +294,8 @@ async fn http_packet_exchange(
     {
         Err(e) => {
             error!("Error when contacting server: {}", e);
-            return ();
+            active_server_calls_nr.fetch_sub(1, Ordering::SeqCst);
+            return (); // caution to decrement on error/early exit
         }
         Ok(res) => res,
     };
@@ -304,16 +312,21 @@ async fn http_packet_exchange(
             "Got back faulty code from tunnel exchange: {}",
             status.as_u16()
         );
-        return ();
+        active_server_calls_nr.fetch_sub(1, Ordering::SeqCst);
+        return (); // caution to decrement on error/early exit
     }
 
     // attempt parse the received json response
     let body = match res.json::<HttpData>().await {
         Err(e) => {
             error!("Server answered, but json body could not be parsed: {}", e);
-            return ();
+            active_server_calls_nr.fetch_sub(1, Ordering::SeqCst);
+            return (); // caution to decrement on error/early exit
         }
-        Ok(b) => b,
+        Ok(b) => {
+            active_server_calls_nr.fetch_sub(1, Ordering::SeqCst); // default decrement
+            b
+        }
     };
 
     let exchange_duration_ms = match SystemTime::now().duration_since(start_exchange) {
@@ -328,7 +341,7 @@ async fn http_packet_exchange(
     }
 
     let num_packets_returned = body.data.len();
-    let num_packets_in_server_queue = body.add_messages;
+    let num_packets_in_server_queue = body.queue_messages;
 
     // forward the packets that were sent in the post data
     for packet in body.data {
@@ -337,6 +350,8 @@ async fn http_packet_exchange(
         }
     }
 
+    let nr_running_requests = active_server_calls_nr.load(Ordering::SeqCst);
+
     // give a resume of what just happened // TODO downgrade to debug
-    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue, exchange_duration_ms);
+    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire. {} running requests", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue, exchange_duration_ms,nr_running_requests);
 }
