@@ -22,7 +22,7 @@ pub async fn run_client(args: &Args) -> () {
         .parse()
         .expect("Invalid udp listen address");
     let server_url = String::from(&args.http_server);
-    let tcp_keep_alive_ping_ms = args.keep_alive_ms;
+    let keep_alive_connections = args.keep_alive_connections;
     let max_client_tunnel_ms = args.max_tunnel_ms;
     let listener_interrupt_ms = args.listener_interrupt_ms;
     let max_number_of_aggregate_messages = args.max_number_of_aggregate_messages;
@@ -48,7 +48,7 @@ pub async fn run_client(args: &Args) -> () {
     let http_client_poller_shutdown_marker = Arc::new(AtomicBool::new(false));
     let http_client_poller = http_client_poller_handler(
         Arc::clone(&http_client_poller_shutdown_marker),
-        tcp_keep_alive_ping_ms,
+        keep_alive_connections,
         max_server_delay_ms,
         max_client_tunnel_ms,
         max_number_of_aggregate_messages,
@@ -169,7 +169,7 @@ async fn udp_listener_client(
 
 async fn http_client_poller_handler(
     shutdown_marker: Arc<AtomicBool>,
-    tcp_keep_alive_ping_ms: u64,
+    keep_alive_connections: u16,
     max_server_delay_ms: u16,
     max_client_tunnel_ms: u64,
     max_number_of_aggregate_messages: usize,
@@ -213,7 +213,7 @@ async fn http_client_poller_handler(
         };
 
         match tokio::time::timeout(
-            Duration::from_millis(tcp_keep_alive_ping_ms),
+            Duration::from_millis(keep_alive_connections.into()),
             receiver_udp_to_http.recv(),
         )
         .await
@@ -237,10 +237,10 @@ async fn http_client_poller_handler(
         while num_add_packets_remaining > 0 {
             match receiver_udp_to_http.try_recv() {
                 Err(e) => {
-                    if e.is_empty() {
-                        break;
+                    if !e.is_empty() {
+                        error!("Reading from channel error: {}", e);
                     }
-                    error!("Reading from channel error: {}", e);
+                    break; // needs to break out of add-packet collection loop in ANY case on error
                 }
                 Ok(mes) => {
                     sending_data.data.push(mes); // additional packet on successful direct read
@@ -283,10 +283,6 @@ async fn http_packet_exchange(
 
     let num_packets_sent = data.data.len();
     let num_packets_in_client_queue = data.queue_messages;
-    let server_should_wait_ms = match data.wait_ms {
-        Some(v) => v,
-        None => 0,
-    };
 
     let start_exchange = SystemTime::now();
 
@@ -337,6 +333,10 @@ async fn http_packet_exchange(
         }
     };
 
+    // request data is all back, one less request is on the wire
+    let nr_running_requests = active_server_calls_nr.load(Ordering::SeqCst);
+
+    // time the request took
     let exchange_duration_ms = match SystemTime::now().duration_since(start_exchange) {
         Err(_) => 0,
         Ok(d) => d.as_millis(),
@@ -348,8 +348,13 @@ async fn http_packet_exchange(
         return ();
     }
 
+    // collect logging data from the exchange (before sending on, because moving vec)
     let num_packets_returned = body.data.len();
     let num_packets_in_server_queue = body.queue_messages;
+    let server_waited_for_ms = match body.wait_ms {
+        Some(v) => v,
+        None => 0,
+    };
 
     // forward the packets that were sent in the post data
     for packet in body.data {
@@ -358,8 +363,6 @@ async fn http_packet_exchange(
         }
     }
 
-    let nr_running_requests = active_server_calls_nr.load(Ordering::SeqCst);
-
     // give a resume of what just happened // TODO downgrade to debug
-    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire of which possibly waited {}ms. {} running requests", num_packets_sent, num_packets_returned,num_packets_in_client_queue,num_packets_in_server_queue, exchange_duration_ms,server_should_wait_ms, nr_running_requests);
+    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire of which it waited {}ms. {} running requests", num_packets_sent, num_packets_returned, num_packets_in_client_queue, num_packets_in_server_queue, exchange_duration_ms, server_waited_for_ms, nr_running_requests);
 }

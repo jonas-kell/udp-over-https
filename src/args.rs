@@ -6,11 +6,11 @@ pub struct Args {
     /// Mode of operation: 'server' or 'client'
     #[arg(value_enum)]
     pub mode: Mode,
-    /// Number of ms until at least once the client probes the server for new packets (only in client mode)
-    #[arg(long, default_value_t = 100)]
-    pub keep_alive_ms: u64,
+    /// Number of connections that should be open at the server to make it be able to send back immediately (only in client mode - flow-control is client-side)
+    #[arg(long, default_value_t = 5)]
+    pub keep_alive_connections: u16,
     /// Number of ms the server is waiting max before sending back an empty packet-aggregation (only in client mode)
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 20)]
     pub max_server_delay_ms: u16,
     /// Maximum number of messages that can be carried over one http exchange to/from the server (only in client mode)
     #[arg(long, default_value_t = 1)]

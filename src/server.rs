@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::{net::UdpSocket, time};
 
 #[derive(Debug)]
@@ -147,6 +147,8 @@ async fn server_main_http_request_handler(
         data: Vec::new(),
     };
 
+    let start_server_wait_timestamp = SystemTime::now();
+
     match tokio::time::timeout(
         Duration::from_millis(
             match post_data.wait_ms {
@@ -191,6 +193,17 @@ async fn server_main_http_request_handler(
         Err(_) => u16::MAX,
         Ok(v) => v,
     };
+
+    // inform the client how long we waited for possible packets
+    let time_spent_waiting_before_return_ms =
+        match SystemTime::now().duration_since(start_server_wait_timestamp) {
+            Err(_) => 0,
+            Ok(d) => match u16::try_from(d.as_millis()) {
+                Err(_) => u16::MAX,
+                Ok(v) => v,
+            },
+        };
+    data.wait_ms = Some(time_spent_waiting_before_return_ms);
 
     // return the data
     HttpResponse::Ok().json(data)
