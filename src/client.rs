@@ -9,7 +9,7 @@ use reqwest::Client;
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime},
@@ -179,8 +179,12 @@ async fn http_client_poller_handler(
     pre_shared_secret: String,
     force_http2: bool,
 ) {
+    // Arc-mutex that keeps track of current system status behavior
     let active_server_calls_nr: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let channel_time_times_ten_tenner_rolling_average_ms: Arc<AtomicU32> =
+        Arc::new(AtomicU32::new(0));
 
+    // Http client pool creation
     let mut builder = Client::builder();
     if force_http2 {
         builder = builder.http2_prior_knowledge();
@@ -262,6 +266,7 @@ async fn http_client_poller_handler(
         // the result of this does not influence the next step of the program, so this will be executed in the background
         tokio::task::spawn(http_packet_exchange(
             Arc::clone(&active_server_calls_nr),
+            Arc::clone(&channel_time_times_ten_tenner_rolling_average_ms),
             http_client.clone(),
             server_url.clone(),
             sending_data,
@@ -273,6 +278,7 @@ async fn http_client_poller_handler(
 
 async fn http_packet_exchange(
     active_server_calls_nr: Arc<AtomicUsize>,
+    channel_time_times_ten_tenner_rolling_average_ms: Arc<AtomicU32>,
     http_client: Client,
     server_url: String,
     data: HttpData,
@@ -363,6 +369,30 @@ async fn http_packet_exchange(
         }
     }
 
+    // calculate the rolling average of how long the channel communication takes (without waiting at server)
+    let rolling_avg = match channel_time_times_ten_tenner_rolling_average_ms.fetch_update(
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+        |x| {
+            let current_rolling_val = f64::from(x) * 0.1;
+            let this_wire_transfer = f64::from(u32::try_from(exchange_duration_ms).unwrap_or(10))
+                - f64::from(server_waited_for_ms);
+
+            let res = 0.9 * current_rolling_val + 0.1 * this_wire_transfer;
+
+            Some((res.round() as u32) * 10)
+        },
+    ) {
+        Err(e) => {
+            error!(
+                "Rolling average computation should not be able to error: {}",
+                e
+            );
+            return ();
+        }
+        Ok(v) => v / 10,
+    };
+
     // give a resume of what just happened // TODO downgrade to debug
-    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire of which it waited {}ms. {} running requests", num_packets_sent, num_packets_returned, num_packets_in_client_queue, num_packets_in_server_queue, exchange_duration_ms, server_waited_for_ms, nr_running_requests);
+    warn!("HTTP-Exchange finished. Sent {} and received {} udp-packets. Client queue has {} and server queue {} udp-packets. Took {}ms over the wire of which it waited {}ms. {} running requests, average wire-transfer takes {}ms", num_packets_sent, num_packets_returned, num_packets_in_client_queue, num_packets_in_server_queue, exchange_duration_ms, server_waited_for_ms, nr_running_requests, rolling_avg);
 }
